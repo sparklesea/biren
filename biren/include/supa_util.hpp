@@ -8,6 +8,7 @@
 
 #define CEIL(x, y) (((x) + (y)-1) / (y))
 
+#define WARP_SIZE = 32
 #define FULLMASK 0xffffffff
 #define MIN(a, b) ((a < b) ? a : b)
 #define MAX(a, b) ((a < b) ? b : a)

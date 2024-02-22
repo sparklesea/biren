@@ -319,18 +319,19 @@ bool check_result(float *C_ref, float *C, int num){
 //     return time_elapsed;
 // }
 
+template <typename DType, typename DType2, typename DType4>
 bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
 {
-    size_t size_A = size_m * size_k * sizeof(float);
-    size_t size_B = size_n * size_k * sizeof(float);
-    size_t size_C = size_m * size_n * sizeof(float);
+    size_t size_A = size_m * size_k * sizeof(DType);
+    size_t size_B = size_n * size_k * sizeof(DType);
+    size_t size_C = size_m * size_n * sizeof(DType);
 
     //申请Host内存并初始化
-    float *h_A = (float *)malloc(size_A);
-    float *h_B = (float *)malloc(size_B);
-    float *h_C = (float *)malloc(size_C);
+    DType *h_A = (DType *)malloc(size_A);
+    DType *h_B = (DType *)malloc(size_B);
+    DType *h_C = (DType *)malloc(size_C);
 
-    float *h_ref = (float *)malloc(size_C); //参考结果
+    DType *h_ref = (DType *)malloc(size_C); //参考结果
 
     if (h_A == NULL || h_B == NULL || h_C == NULL || h_ref == NULL){
         printf ("malloc failed\n");
@@ -340,7 +341,7 @@ bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
     init_random(h_B, size_k*size_n);
 
     std::vector<int> csrptr, csrind;
-    std::vector<float> csrval;
+    std::vector<DType> csrval;
     csrptr.push_back(0);
     for(int row=0;row < size_m;++row){
         for(int col=0;col < size_k;++col){
@@ -355,35 +356,29 @@ bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
 
     size_t size_ptr = csrptr.size() * sizeof(int);
     size_t size_ind = csrind.size() * sizeof(int);
-    size_t size_val = csrval.size() * sizeof(float);
+    size_t size_val = csrval.size() * sizeof(DType);
 
     //申请Device内存
-    float *d_B = NULL;
+    DType *d_B = NULL;
     checkSupaError(suMallocDevice((void **)&d_B, size_B));
-    float *d_B_trans = NULL;
-    checkSupaError(suMallocDevice((void **)&d_B_trans, size_B));
-    float *d_C = NULL;
+    DType *d_C = NULL;
     checkSupaError(suMallocDevice((void **)&d_C, size_C));
     suMemset((void *)d_C, 0, size_C);
-    int *d_E = NULL;
-    checkSupaError(suMallocDevice((void **)&d_E, size_m * size_n * sizeof(int)));
     int *d_ptr = NULL;
     checkSupaError(suMallocDevice((void **)&d_ptr, size_ptr));
     int *d_ind = NULL;
     checkSupaError(suMallocDevice((void **)&d_ind, size_ind));
-    float *d_val = NULL;
+    DType *d_val = NULL;
     checkSupaError(suMallocDevice((void **)&d_val, size_val));
 
     //从Host端提交到Device端
     checkSupaError(suMemcpy(d_B,h_B,size_B,suMemcpyHostToDevice));
-    checkSupaError(suMemcpy(d_B_trans,h_B_trans,size_B,suMemcpyHostToDevice));
-    checkSupaError(suMemcpy(d_E,E,size_m * size_n * sizeof(int),suMemcpyHostToDevice));
     checkSupaError(suMemcpy(d_ptr,&csrptr[0],size_ptr,suMemcpyHostToDevice));
     checkSupaError(suMemcpy(d_ind,&csrind[0],size_ind,suMemcpyHostToDevice));
     checkSupaError(suMemcpy(d_val,&csrval[0],size_val,suMemcpyHostToDevice));
 
     //调用kernel
-    if (algorithm == method::rocsparse){
+    if (algorithm == method::naive){
 
     }else if(algorithm == method::dgsparse_0){
             int Mdim_worker = size_m;
@@ -398,7 +393,7 @@ bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
             dim3 gridDim(Mdim_threadblock, Ndim_threadblock, 1);
             dim3 blockDim(Ndim_thread_per_tb, Mdim_thread_per_tb, 1);
 
-            suLaunchKernel(csrspmm_seqreduce_rowbalance_kernel<int, float>,
+            suLaunchKernel(csrspmm_seqreduce_rowbalance_kernel<int, DType>,
                             gridDim, blockDim, 0, NULL,
                             Mdim_worker, Ndim_worker, d_ptr, d_ind, d_val,
                             d_B, d_C);
@@ -416,11 +411,10 @@ bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
         dim3 gridDim(Mdim_threadblock, Ndim_threadblock, 1);
         dim3 blockDim(Ndim_thread_per_tb, Mdim_thread_per_tb, 1);
 
-        suLaunchKernel(csrspmm_seqreduce_nnzbalance_kernel<int, float>,
+        suLaunchKernel(csrspmm_seqreduce_nnzbalance_kernel<int, DType>,
                         gridDim, blockDim, 0, NULL,
                         Mdim_worker, Ndim_worker, csrval.size(), 
-                        d_ptr, d_ind, d_val,
-                        d_B, d_C);
+                        d_ptr, d_ind, d_val, d_B, d_C);
     }
     else if(algorithm == method::dgsparse_2){
         int Mdim_worker = size_m;
@@ -441,34 +435,22 @@ bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
         dim3 blockDim(Ndim_warp_per_tb * WARP_SIZE, Mdim_warp_per_tb, 1);
 
         if (coarsen_factor == 4){
-            SWITCH_REDUCEOP(REDUCEOP::SUM, REDUCE, {
-                SWITCH_COMPUTEOP(COMPUTEOP::ADD, COMPUTE, {
-                    csrspmm_parreduce_rowbalance_kernel<int, float, float4, REDUCE,
-                                                    COMPUTE><<<gridDim, blockDim>>>(
-                            Mdim_worker, Ndim_worker, d_ptr, d_ind, d_val,
-                            d_B, d_C, d_E);
-                });
-            });
+            suLaunchkernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType4>,
+                            gridDim, blockDim, 0, NULL,
+                            Mdim_worker, Ndim_worker, 
+                            d_ptr, d_ind, d_val, d_B, d_C);
         }
         if (coarsen_factor == 2){
-            SWITCH_REDUCEOP(REDUCEOP::SUM, REDUCE, {
-                SWITCH_COMPUTEOP(COMPUTEOP::ADD, COMPUTE, {
-                    csrspmm_parreduce_rowbalance_kernel<int, float, float2, REDUCE,
-                                                    COMPUTE><<<gridDim, blockDim>>>(
-                            Mdim_worker, Ndim_worker, d_ptr, d_ind, d_val,
-                            d_B, d_C, d_E);
-                });
-            });
+            suLaunchkernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType2>,
+                            gridDim, blockDim, 0, NULL,
+                            Mdim_worker, Ndim_worker,
+                            d_ptr, d_ind, d_val, d_B, d_C);
         }
         else {
-            SWITCH_REDUCEOP(REDUCEOP::SUM, REDUCE, {
-                SWITCH_COMPUTEOP(COMPUTEOP::ADD, COMPUTE, {
-                    csrspmm_parreduce_rowbalance_kernel<int, float, float, REDUCE,
-                                                    COMPUTE><<<gridDim, blockDim>>>(
-                            Mdim_worker, Ndim_worker, d_ptr, d_ind, d_val,
-                            d_B, d_C, d_E);
-                });
-            });
+            suLaunchkernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType>,
+                            gridDim, blockDim, 0, NULL,
+                            Mdim_worker, Ndim_worker, 
+                            d_ptr, d_ind, d_val, d_B, d_C);
         }
     }
     else if(algorithm == method::dgsparse_3){
@@ -494,42 +476,34 @@ bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
         dim3 blockDim(Ndim_warp_per_tb * WARP_SIZE, Nnzdim_warp_per_tb, 1);
 
         if (coarsen_factor == 4) {
-            csrspmm_parreduce_nnzbalance_kernel<int,float,float4><<<gridDim,
-            blockDim>>>(
-                size_m, Ndim_worker, Nnzdim_worker, d_ptr, d_ind, d_val, d_B, d_C);
+            suLaunchKernel(csrspmm_parreduce_nnzbalance_kernel<int,DType,DType4>,
+                            gridDim, blockDim, 0, NULL,
+                            size_m, Ndim_worker, Nnzdim_worker, 
+                            d_ptr, d_ind, d_val, d_B, d_C);
         } else if (coarsen_factor == 2) {
-            csrspmm_parreduce_nnzbalance_kernel<int,float,float2><<<gridDim,
-            blockDim>>>(
-                size_m, Ndim_worker, Nnzdim_worker, d_ptr, d_ind, d_val, d_B, d_C);
+            suLaunchKernel(csrspmm_parreduce_nnzbalance_kernel<int,DType,DType2>,
+                            gridDim, blockDim, 0, NULL,
+                            size_m, Ndim_worker, Nnzdim_worker, 
+                            d_ptr, d_ind, d_val, d_B, d_C);
         } else {
-            csrspmm_parreduce_nnzbalance_kernel<int,float,float><<<gridDim,
-            blockDim>>>(
-                size_m, Ndim_worker, Nnzdim_worker, d_ptr, d_ind, d_val, d_B, d_C);
+            suLaunchKernel(csrspmm_parreduce_nnzbalance_kernel<int,DType,DType>,
+                            gridDim, blockDim, 0, NULL,
+                            size_m, Ndim_worker, Nnzdim_worker, 
+                            d_ptr, d_ind, d_val, d_B, d_C);
         }
     }
 
     //CPU计算
-    if(is_transpose){
-        for(int col = 0; col < size_n; col++){
-            for(int row = 0; row < size_m; row++){
-                int id = col * size_m + row;
-                h_ref[id]=0;
-                for(int k = 0; k<size_k;k++){
-                    h_ref[id] += h_A[row * size_k + k] * h_B[k * size_n + col];
-                }
-            }
-        }
-    } else{
-        for(int row = 0; row<size_m;row++){
-            for(int col = 0; col<size_n;col++){
-                int id = row*size_n+col;
-                h_ref[id]=0;
-                for(int k = 0; k<size_k;k++){
-                    h_ref[id] += h_A[row * size_k + k] * h_B[k * size_n + col];
-                }
+    for(int row = 0; row<size_m;row++){
+        for(int col = 0; col<size_n;col++){
+            int id = row*size_n+col;
+            h_ref[id]=0;
+            for(int k = 0; k<size_k;k++){
+                h_ref[id] += h_A[row * size_k + k] * h_B[k * size_n + col];
             }
         }
     }
+
     //将结果从Device端传回Host端
     checkSupaError(suMemcpy(h_C,d_C,size_C,suMemcpyDeviceToHost));
     checkSupaError(suDeviceSynchronize());
@@ -543,17 +517,13 @@ bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
 
     // 释放内存
     suFree(d_B);
-    suFree(d_B_trans);
     suFree(d_C);
-    suFree(d_E);
     suFree(d_ptr);
     suFree(d_ind);
     suFree(d_val);
     free(h_A);
     free(h_B);
-    free(h_B_trans);
     free(h_C);
-    free(E);
     free(h_ref);
 
     csrptr.clear();csrptr.shrink_to_fit();
@@ -572,46 +542,46 @@ int main(int argc,char **argv)
     spmm_check(1000, 1000, 128, method::dgsparse_2);
     spmm_check(1000, 1000, 128, method::dgsparse_3);
 
-    int size_m[4]={1000, 5000, 10000};
-    int size_k[4]={1000, 5000, 10000};
-    int size_n[3]={32,64,128};
+    // int size_m[4]={1000, 5000, 10000};
+    // int size_k[4]={1000, 5000, 10000};
+    // int size_n[3]={32,64,128};
 
-    float speedup_0 = 0, speedup_1 =0, speedup_2 = 0, speedup_3 = 0;
-    float time_ref, time_0, time_1, time_2, time_3, time_group;
-    for(int i=0;i<3;++i){
-        for(int j=0;j<3;++j){
-            for(int k=0;k<3;++k){
-                size_t size_sparse = size_m[i] * size_k[j] * sizeof(float);
-                float *sparse = (float *)malloc(size_sparse);
-                init_random_sparse(sparse, size_m[i] * size_k[j], 0.01);
+    // float speedup_0 = 0, speedup_1 =0, speedup_2 = 0, speedup_3 = 0;
+    // float time_ref, time_0, time_1, time_2, time_3, time_group;
+    // for(int i=0;i<3;++i){
+    //     for(int j=0;j<3;++j){
+    //         for(int k=0;k<3;++k){
+    //             size_t size_sparse = size_m[i] * size_k[j] * sizeof(float);
+    //             float *sparse = (float *)malloc(size_sparse);
+    //             init_random_sparse(sparse, size_m[i] * size_k[j], 0.01);
 
-                printf("[Spmm of %d*%d*%d", size_m[i], size_k[j], size_n[k]);
-                time_0 = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::dgsparse_0);
-                time_1 = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::dgsparse_1);
-                time_2 = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::dgsparse_2);
-                time_3 = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::dgsparse_3);
-                time_group = spmm_group_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01);
-                time_ref = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::rocsparse);
-                printf("\n");
-                speedup_0 += time_ref/time_0;
-                speedup_1 += time_ref/time_1;
-                speedup_2 += time_ref/time_2;
-                speedup_3 += time_ref/time_3;
-                speedup_group += time_ref/time_group;
+    //             printf("[Spmm of %d*%d*%d", size_m[i], size_k[j], size_n[k]);
+    //             time_0 = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::dgsparse_0);
+    //             time_1 = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::dgsparse_1);
+    //             time_2 = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::dgsparse_2);
+    //             time_3 = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::dgsparse_3);
+    //             time_group = spmm_group_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01);
+    //             time_ref = spmm_time(sparse, size_m[i], size_k[j], size_n[k], 300, 0.01, method::rocsparse);
+    //             printf("\n");
+    //             speedup_0 += time_ref/time_0;
+    //             speedup_1 += time_ref/time_1;
+    //             speedup_2 += time_ref/time_2;
+    //             speedup_3 += time_ref/time_3;
+    //             speedup_group += time_ref/time_group;
 
-                free(sparse);
-            }
-        }
-    }
-    speedup_0 /= 27;
-    speedup_1 /= 27;
-    speedup_2 /= 27;
-    speedup_3 /= 27;
-    speedup_group /= 27;
-    printf("average_speedup_0 = %.3f\n", speedup_0);
-    printf("average_speedup_1 = %.3f\n", speedup_1);
-    printf("average_speedup_2 = %.3f\n", speedup_2);
-    printf("average_speedup_3 = %.3f\n", speedup_3);
-    printf("average_speedup_group = %.3f\n", speedup_group);
+    //             free(sparse);
+    //         }
+    //     }
+    // }
+    // speedup_0 /= 27;
+    // speedup_1 /= 27;
+    // speedup_2 /= 27;
+    // speedup_3 /= 27;
+    // speedup_group /= 27;
+    // printf("average_speedup_0 = %.3f\n", speedup_0);
+    // printf("average_speedup_1 = %.3f\n", speedup_1);
+    // printf("average_speedup_2 = %.3f\n", speedup_2);
+    // printf("average_speedup_3 = %.3f\n", speedup_3);
+    // printf("average_speedup_group = %.3f\n", speedup_group);
     return 0;
 }
