@@ -2,12 +2,11 @@
 #include <stdlib.h>
 #include <supa.h>
 #include <supa_runtime.h>
-#include <supa_runtime_api.h>
 #include <vector>
 #include <time.h>
 
 #include "../include/spmm_supa.hpp"
-#include "../include/spmm_util.hpp"
+#include "../include/supa_util.hpp"
 
 enum method{
     naive,
