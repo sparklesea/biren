@@ -18,13 +18,12 @@ csrspmm_seqreduce_rowbalance_kernel(const Index nr, const Index feature_size,
   Index v_id = (block_idx.y * block_dim.x) + thread_idx.x;
   dnInput += v_id;
   dnOutput += v_id;
-  E += v_id;
   DType val;
   // DType res = init(REDUCE::Op);
   Index col;
   for (; row < nr; row += stride) {
     DType res = 0;
-    Index E_k_idx = -1;
+    // Index E_k_idx = -1;
     Index start = __ldg(rowPtr + row);
     Index end = __ldg(rowPtr + row + 1);
     if ((end - start) > 0) {
