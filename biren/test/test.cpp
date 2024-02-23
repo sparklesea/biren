@@ -536,10 +536,10 @@ int main(int argc,char **argv)
     srand((int)time(0));
 
     //check correctness
-    spmm_check(1000, 1000, 128, method::dgsparse_0);
-    spmm_check(1000, 1000, 128, method::dgsparse_1);
-    spmm_check(1000, 1000, 128, method::dgsparse_2);
-    spmm_check(1000, 1000, 128, method::dgsparse_3);
+    spmm_check<float, float2, float4>(1000, 1000, 128, method::dgsparse_0);
+    spmm_check<float, float2, float4>(1000, 1000, 128, method::dgsparse_1);
+    spmm_check<float, float2, float4>(1000, 1000, 128, method::dgsparse_2);
+    spmm_check<float, float2, float4>(1000, 1000, 128, method::dgsparse_3);
 
     // int size_m[4]={1000, 5000, 10000};
     // int size_k[4]={1000, 5000, 10000};
