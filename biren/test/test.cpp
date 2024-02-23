@@ -434,19 +434,19 @@ bool spmm_check(int size_m, int size_k, int size_n, method algorithm)
         dim3 blockDim(Ndim_warp_per_tb * WARP_SIZE, Mdim_warp_per_tb, 1);
 
         if (coarsen_factor == 4){
-            suLaunchkernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType4>,
+            suLaunchKernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType4>,
                             gridDim, blockDim, 0, NULL,
                             Mdim_worker, Ndim_worker, 
                             d_ptr, d_ind, d_val, d_B, d_C);
         }
         if (coarsen_factor == 2){
-            suLaunchkernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType2>,
+            suLaunchKernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType2>,
                             gridDim, blockDim, 0, NULL,
                             Mdim_worker, Ndim_worker,
                             d_ptr, d_ind, d_val, d_B, d_C);
         }
         else {
-            suLaunchkernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType>,
+            suLaunchKernel(csrspmm_parreduce_rowbalance_kernel<int, DType, DType>,
                             gridDim, blockDim, 0, NULL,
                             Mdim_worker, Ndim_worker, 
                             d_ptr, d_ind, d_val, d_B, d_C);
