@@ -26,26 +26,23 @@ csrspmm_seqreduce_rowbalance_kernel(const Index nr, const Index feature_size,
     // Index E_k_idx = -1;
     Index start = __ldg(rowPtr + row);
     Index end = __ldg(rowPtr + row + 1);
-    if ((end - start) > 0) {
-      for (Index p = start; p < end; p++) {
-        DType val_pre_red;
-        col = __ldg(colIdx + p);
-        val = __guard_load_default_one<DType>(values, p);
-        val_pre_red = val * __ldg(dnInput + col * feature_size);
-        // if ((REDUCE::Op == MAX && (res < val_pre_red)) ||
-        //     ((REDUCE::Op == MIN) && (res > val_pre_red))) {
-        //   E_k_idx = col;
-        // }
-        res = res + val_pre_red;
+    for (Index p = start; p < end; p++) {
+      DType val_pre_red;
+      col = __ldg(colIdx + p);
+      val = __guard_load_default_one<DType>(values, p);
+      val_pre_red = val * __ldg(dnInput + col * feature_size);
+      // if ((REDUCE::Op == MAX && (res < val_pre_red)) ||
+      //     ((REDUCE::Op == MIN) && (res > val_pre_red))) {
+      //   E_k_idx = col;
+      // }
+      res = res + val_pre_red;
 
-        // res += val * __ldg(dnInput + col * feature_size);
-      }
+      // res += val * __ldg(dnInput + col * feature_size);
+    }
       // if (REDUCE::Op == MEAN) {
       //   res /= (end - start);
       // }
-    } else {
-      res = 0;
-    }
+
     dnOutput[row * feature_size] = res;
     // E[row * feature_size] = E_k_idx;
   }
@@ -135,7 +132,7 @@ csrspmm_parreduce_rowbalance_kernel(const Index nr, const Index feature_size,
     Index k;
     DType val;
     DType val_pre_red;
-    Index E_k_idx[CoarsenFactor] = {0};
+    // Index E_k_idx[CoarsenFactor] = {0};
     // DType res = init(REDUCE::Op);
 
     for (Index jj = start + lane_id; jj < end; jj += 32) {
@@ -193,7 +190,7 @@ Ndim_Residue:
     Index k;
     DType val;
     DType val_pre_red;
-    Index E_k_idx[CoarsenFactor] = {0};
+    // Index E_k_idx[CoarsenFactor] = {0};
 
     for (Index jj = start + lane_id; jj < end; jj += 32) {
       k = colIdx[jj];
@@ -270,7 +267,7 @@ csrspmm_parreduce_nnzbalance_kernel(const Index nr, const Index feature_size,
 
   if (col_offset >= feature_size)
     return;
-  if (col_offset + CoarsenFactor >= feature_size)
+  if (col_offset + CoarsenFactor > feature_size)
     goto Ndim_Residue;
 
   for (int nz_id = nz_start + lane_id;
@@ -300,7 +297,7 @@ csrspmm_parreduce_nnzbalance_kernel(const Index nr, const Index feature_size,
 // if all non-zeros in this warp belong to the same row, use a simple reduction
 #pragma unroll
       for (int i = 0; i < CoarsenFactor; i++) {
-        // SHFL_DOWN_REDUCE(c[i]);
+        SHFL_DOWN_REDUCE(c[i]);
       }
       if (lane_id == 0) {
 #pragma unroll
@@ -359,7 +356,7 @@ Ndim_Residue:
     if (row_intv == 0) {
 #pragma unroll
       for (int i = 0; i < CoarsenFactor; i++) {
-        // SHFL_DOWN_REDUCE(c[i]);
+        SHFL_DOWN_REDUCE(c[i]);
       }
       if (lane_id == 0) {
 #pragma unroll
@@ -389,6 +386,104 @@ Ndim_Residue:
     }
   }
   return;
+}
+
+__global__ void spmm_naive_kernel(
+    int A_nrows, int B_ncols,
+    int* A_csrRowPtr, int* A_csrColInd, float* A_csrVal,
+    float* B_dnVal, float* C_dnVal
+)
+{
+	int rid = block_dim.y*block_idx.x+thread_idx.y;
+
+	if (rid<A_nrows) {
+		int cid = (block_idx.y<<5)+thread_idx.x;
+		int lb = A_csrRowPtr[rid];
+		int hb = A_csrRowPtr[rid+1];
+		int offset = 0;
+		float acc=0;
+		if (block_idx.y!=grid_dim.y-1){
+			for (int ptr = lb; ptr<hb; ptr++) {
+				offset = A_csrColInd[ptr]*B_ncols+cid;
+				acc += A_csrVal[ptr]*B_dnVal[offset];
+			}
+			C_dnVal[(rid*B_ncols+cid)] = acc;
+		}
+		else {
+			for (int ptr = lb; ptr<hb; ptr++) {
+				if (cid<B_ncols) {
+					offset = A_csrColInd[ptr]*B_ncols+cid;
+        }
+        acc += A_csrVal[ptr]*B_dnVal[offset];
+      }
+      if (cid<B_ncols) {
+          C_dnVal[(rid*B_ncols+cid)] = acc;
+      }
+		}
+	}
+}
+
+__global__ void spmm_shmem_kernel(
+    int A_nrows, int B_ncols,
+    int* A_csrRowPtr, int* A_csrColInd, float* A_csrVal,
+    float* B_dnVal, float* C_dnVal
+)
+{
+    extern __shared__ int sh[];
+    int *colInd_sh = sh;
+    float *val_sh = (float *)&sh[(block_dim.y<<5)];
+    int shmem_offset = (thread_idx.y<<5);
+    int threadidx = shmem_offset+thread_idx.x;
+
+    int rid = block_dim.y*block_idx.x+thread_idx.y;
+    
+    if (rid<A_nrows) {
+        int cid = (block_idx.y<<5)+thread_idx.x;
+        int lb = A_csrRowPtr[rid];
+        int hb = A_csrRowPtr[(rid+1)];
+        int ptr = lb+thread_idx.x;
+        int offset;
+        float acc=0;
+
+        if (block_idx.y != grid_dim.y-1) {
+            for (int jj=lb; jj<hb; jj+=32) {
+                if (ptr<hb) {
+                    val_sh[threadidx] = A_csrVal[ptr];
+                    colInd_sh[threadidx] = B_ncols*A_csrColInd[ptr];
+                }
+                __sync_warp();
+                ptr += 32;
+
+                for (int kk=0; kk<32&&jj+kk<hb; kk++) {
+                    offset = colInd_sh[(shmem_offset+kk)] + cid;
+                    acc += val_sh[(shmem_offset+kk)]*B_dnVal[offset];
+                }
+                __sync_warp();
+            }
+            C_dnVal[(rid*B_ncols+cid)] = acc;
+        }
+        else {
+            for (int jj=lb; jj<hb; jj+=32) {
+                if (ptr<hb) {
+                    val_sh[threadidx] = A_csrVal[ptr];
+                    colInd_sh[threadidx] = B_ncols*A_csrColInd[ptr];
+                }
+                __sync_warp();
+                ptr += 32;
+
+                for (int kk=0; kk<32&&jj+kk<hb; kk++) {
+                    offset = colInd_sh[(shmem_offset+kk)] + cid;
+                    if (cid<B_ncols) {
+                        acc += val_sh[(shmem_offset+kk)]*B_dnVal[offset];
+                    }
+                }
+                __sync_warp();
+            }
+            if (cid<B_ncols) {
+                C_dnVal[(rid*B_ncols+cid)] = acc;
+            }
+        }
+    }
 }
 
 #endif

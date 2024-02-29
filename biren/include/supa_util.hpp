@@ -52,15 +52,17 @@
     }                                                                          \
   } while (0)
 
-// #define checkCuSparseError(a)                                                  \
-//   do {                                                                         \
-//     if (CUSPARSE_STATUS_SUCCESS != (a)) {                                      \
-//       fprintf(stderr, "CuSparse runTime error in line %d of file %s \
-//     : %s \n",                                                                  \
-//               __LINE__, __FILE__, cudaGetErrorString(cudaGetLastError()));     \
-//       exit(EXIT_FAILURE);                                                      \
-//     }                                                                          \
-//   } while (0)
+template<typename T>
+__device__ __forceinline__ void ldg_float(float *r, const float*a)
+{
+    (reinterpret_cast<T *>(r))[0] = *(reinterpret_cast<const T*>(a));
+}
+template<typename T>
+__device__ __forceinline__ void st_float(float *a, float *v)
+{
+    *(T*)a = *(reinterpret_cast<T *>(v));
+}
+
 __device__ __forceinline__ float sum_reduce(float acc, float x) {
   return acc + x;
 }

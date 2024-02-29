@@ -16,16 +16,12 @@ __global__ void sddmmCSR2Scale(const int S_mrows, int D_kcols,
   if (block_idx.x < Size / 16) {
     float multi[4] = {0, 0, 0, 0};
     int offset1[4], offset2[4];
-    int length[4] = {1, 1, 1, 1};
     float2 D1tmp[4], D2tmp[4];
     Load<int4, int>(offset2, S_csrColInd, eid);
     offset1[0] = findRow(S_csrRowPtr, eid, 0, S_mrows);
     offset1[3] = findRow(S_csrRowPtr, eid + 3, offset1[0], S_mrows);
     offset1[1] = findRow(S_csrRowPtr, eid + 1, offset1[0], offset1[3]);
     offset1[2] = findRow(S_csrRowPtr, eid + 2, offset1[1], offset1[3]);
-    for (int i = 0; i < 4; i++) {
-      length[i] = S_csrRowPtr[offset1[i] + 1] - S_csrRowPtr[offset1[i]];
-    }
     selfMulConst4<int>(offset1, D_kcols);
     selfMulConst4<int>(offset2, D_kcols);
 
@@ -49,13 +45,6 @@ __global__ void sddmmCSR2Scale(const int S_mrows, int D_kcols,
       }
     }
     AllReduce4<float>(multi, 8, 32);
-    // if (REDUCE::Op == MEAN) {
-    //   for (int i = 0; i < 4; ++i) {
-    //     if (length[i] > 0) {
-    //       multi[i] /= length[i];
-    //     }
-    //   }
-    // }
     if (thread_idx.x == 0) {
       Store<float4, float>(O_csrVal, multi, eid);
     }
@@ -63,8 +52,6 @@ __global__ void sddmmCSR2Scale(const int S_mrows, int D_kcols,
   {
     eid = Size - (Size & 15) + (block_idx.x - (Size / 16));
     int offset1 = findRow(S_csrRowPtr, eid, 0, S_mrows) * D_kcols;
-    int length =
-        S_csrRowPtr[offset1 / D_kcols + 1] - S_csrRowPtr[offset1 / D_kcols];
     int offset2 = S_csrColInd[eid] * D_kcols;
     float multi = 0;
     int off1 = cid = (thread_idx.y << 4) + thread_idx.x;
@@ -87,9 +74,6 @@ __global__ void sddmmCSR2Scale(const int S_mrows, int D_kcols,
     for (int stride = 16; stride > 0; stride >>= 1) {
       multi += __shfl_xor_sync(0xffffffff, multi, stride, 32);
     }
-    // if (REDUCE::Op == MEAN && length > 0) {
-    //   multi /= length;
-    // }
     if (thread_idx.x == 0 && thread_idx.y == 0) {
       O_csrVal[eid] = multi;
     }
@@ -108,7 +92,6 @@ __global__ void sddmmCSR1Scale(const int S_mrows, int D_kcols,
     float multi[4] = {0, 0, 0, 0};
     int offset1[4], offset2[4];
     float D1tmp[4], D2tmp[4];
-    int length[4] = {1, 1, 1, 1};
 
     Load<int4, int>(offset2, S_csrColInd, eid);
 
@@ -117,9 +100,6 @@ __global__ void sddmmCSR1Scale(const int S_mrows, int D_kcols,
     offset1[1] = findRow(S_csrRowPtr, eid + 1, offset1[0], offset1[3]);
     offset1[2] = findRow(S_csrRowPtr, eid + 2, offset1[1], offset1[3]);
 
-    for (int i = 0; i < 4; i++) {
-      length[i] = S_csrRowPtr[offset1[i] + 1] - S_csrRowPtr[offset1[i]];
-    }
     selfMulConst4<int>(offset1, D_kcols);
     selfMulConst4<int>(offset2, D_kcols);
 
@@ -139,13 +119,6 @@ __global__ void sddmmCSR1Scale(const int S_mrows, int D_kcols,
       }
     }
     AllReduce4<float>(multi, 16, 32);
-    // if (REDUCE::Op == MEAN) {
-    //   for (int i = 0; i < 4; ++i) {
-    //     if (length[i] > 0) {
-    //       multi[i] /= length[i];
-    //     }
-    //   }
-    // }
     if (thread_idx.x == 0) {
       Store<float4, float>(O_csrVal, multi, eid);
     }
@@ -153,8 +126,6 @@ __global__ void sddmmCSR1Scale(const int S_mrows, int D_kcols,
   {
     eid = Size - (Size & 15) + (block_idx.x - (Size / 16));
     int offset1 = findRow(S_csrRowPtr, eid, 0, S_mrows) * D_kcols;
-    int length =
-        S_csrRowPtr[offset1 / D_kcols + 1] - S_csrRowPtr[offset1 / D_kcols];
     int offset2 = S_csrColInd[eid] * D_kcols;
     float multi = 0;
     int off1 = cid = thread_idx.x;
@@ -177,12 +148,25 @@ __global__ void sddmmCSR1Scale(const int S_mrows, int D_kcols,
     for (int stride = 16; stride > 0; stride >>= 1) {
       multi += __shfl_xor_sync(0xffffffff, multi, stride, 32);
     }
-    // if (REDUCE::Op == MEAN && length > 0) {
-    //   multi /= length;
-    // }
     if (thread_idx.x == 0 && thread_idx.y == 0) {
       O_csrVal[eid] = multi;
     }
+  }
+}
+
+
+__global__ void sddmmCSRNaive(
+  const int S_mrows, int D_kcols, const unsigned long Size, int* S_csrRowPtr, int* S_csrColInd, float* D1_dnVal, float* D2_dnVal, float* O_csrVal
+) {
+  int eid = block_idx.x * block_dim.x + thread_idx.x;
+  if (eid < Size) {
+    int row = findRow(S_csrRowPtr, eid, 0, S_mrows);
+    int col = S_csrColInd[eid];
+    float result = 0;
+    for (int k = 0; k < D_kcols; k++) {
+      result += D1_dnVal[row * D_kcols + k] * D2_dnVal[col * D_kcols + k];
+    }
+    O_csrVal[eid] = result;
   }
 }
 
